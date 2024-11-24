@@ -5,23 +5,36 @@ using System.IO;
 using System.IO.Compression;
 using System.Net.Sockets;
 using System.Text;
+using TMPro;
 using UnityEngine;
 using UnityEngine.SceneManagement;
 
-public class GameManager : MonoBehaviour
+public class NetworkManager : MonoBehaviour
 {
-    private static GameManager instance;
-    public static GameManager Instance
+    [SerializeField] private GameObject playerPrefab;
+    [SerializeField] private GameObject starPrefab;
+    [SerializeField] private GameObject npcPrefab;
+
+    [SerializeField] private Material redMaterial;
+    [SerializeField] private Material greenMaterial;
+    [SerializeField] private Material blueMaterial;
+
+    [SerializeField] private TextMeshProUGUI sceneNameText;
+    [SerializeField] private TextMeshProUGUI playerNameText;
+    [SerializeField] private TextMeshProUGUI playerScoreText;
+
+    private static NetworkManager instance;
+    public static NetworkManager Instance
     {
         get
         {
             if (instance == null)
             {
-                instance = FindObjectOfType<GameManager>();
+                instance = FindObjectOfType<NetworkManager>();
                 if (instance == null)
                 {
-                    GameObject singleton = new GameObject(typeof(GameManager).ToString());
-                    instance = singleton.AddComponent<GameManager>();
+                    GameObject singleton = new GameObject(typeof(NetworkManager).ToString());
+                    instance = singleton.AddComponent<NetworkManager>();
                     DontDestroyOnLoad(singleton);
                 }
             }
@@ -37,15 +50,10 @@ public class GameManager : MonoBehaviour
     private StringBuilder messageBuilder = new StringBuilder();
 
     public uint clientId;
-    public PlayerData playerData;
-    public WorldState worldState;
-
-    public GameObject playerPrefab;
-    public GameObject bulletPrefab;
-    public GameObject npcPrefab;
+    public WorldState worldState = new WorldState();
 
     private Dictionary<uint, GameObject> playerObjects = new Dictionary<uint, GameObject>();
-    private Dictionary<uint, GameObject> bulletObjects = new Dictionary<uint, GameObject>();
+    private Dictionary<uint, GameObject> starObjects = new Dictionary<uint, GameObject>();
     private Dictionary<uint, GameObject> npcObjects = new Dictionary<uint, GameObject>();
 
     void Awake()
@@ -72,6 +80,40 @@ public class GameManager : MonoBehaviour
         {
             ReceiveDataFromServer();
             HandleInput();
+        }
+
+        // UI 업데이트
+        SortedDictionary<string, int> playerScores = new SortedDictionary<string, int>();
+
+        // 데이터 추가
+        foreach (var world in worldState.Worlds)
+        {
+            foreach (var player in world.Value.Players)
+            {
+                playerScores[player.Value.Name] = player.Value.Score;
+            }
+        }
+
+        StringBuilder playerNamesBuilder = new StringBuilder();
+        StringBuilder playerScoresBuilder = new StringBuilder();
+
+        // playerScores의 Key 값에 따라 데이터 추가
+        foreach (var playerScore in playerScores)
+        {
+            playerNamesBuilder.AppendLine(playerScore.Key);
+            playerScoresBuilder.AppendLine(playerScore.Value.ToString());
+        }
+
+        // 텍스트 업데이트
+        playerNameText.text = playerNamesBuilder.ToString();
+        playerScoreText.text = playerScoresBuilder.ToString();
+    }
+
+    private void OnApplicationQuit()
+    {
+        if (client != null)
+        {
+            client.Close();
         }
     }
 
@@ -104,7 +146,7 @@ public class GameManager : MonoBehaviour
         }
     }
 
-    // 데이터를 GZipStream을 사용하여 해제압축합니다.
+    // 데이터를 GZipStream을 사용하여 압축해제합니다.
     private byte[] DecompressData(byte[] data, int length)
     {
         try
@@ -119,7 +161,7 @@ public class GameManager : MonoBehaviour
         }
         catch (Exception ex)
         {
-            Debug.LogError("데이터 해제압축 중 오류 발생: " + ex.Message);
+            Debug.LogError("데이터 해제 압축 중 오류 발생: " + ex.Message);
             return null;
         }
     }
@@ -131,11 +173,6 @@ public class GameManager : MonoBehaviour
         {
             string jsonData = message.Substring("DATA:".Length);
             ProcessWorldState(jsonData);
-        }
-        else if (message.StartsWith("MSG:"))
-        {
-            string textMessage = message.Substring("MSG:".Length);
-            Debug.Log("서버 메시지: " + textMessage);
         }
         else if (message.StartsWith("ID:"))
         {
@@ -236,8 +273,9 @@ public class GameManager : MonoBehaviour
             {
                 if (player.Value.NetworkId == clientId && player.Value.SceneName != currentSceneName)
                 {
+                    sceneNameText.text = player.Value.SceneName;
                     playerObjects.Clear();
-                    bulletObjects.Clear();
+                    starObjects.Clear();
                     npcObjects.Clear();
                     SceneManager.LoadScene(player.Value.SceneName);
                     sceneChanged = true;
@@ -251,7 +289,7 @@ public class GameManager : MonoBehaviour
             }
 
             UpdateEntities(world.Value.Players, playerObjects, playerPrefab, currentSceneName);
-            UpdateEntities(world.Value.Bullets, bulletObjects, bulletPrefab, currentSceneName);
+            UpdateEntities(world.Value.Stars, starObjects, starPrefab, currentSceneName);
             UpdateEntities(world.Value.Npcs, npcObjects, npcPrefab, currentSceneName);
         }
     }
@@ -267,6 +305,13 @@ public class GameManager : MonoBehaviour
                 {
                     GameObject entityObject = Instantiate(prefab);
                     entityObject.name = $"{typeof(T).Name}_{entity.Key}";
+
+                    // 자기 자신은 파란색, 다른 플레이어라면 빨간색으로 표시
+                    if (typeof(T) == typeof(PlayerData))
+                    {
+                        entityObject.GetComponent<MeshRenderer>().material = entity.Key == clientId ? blueMaterial : redMaterial;
+                    }
+
                     objectPool[entity.Key] = entityObject;
                 }
 
@@ -286,15 +331,7 @@ public class GameManager : MonoBehaviour
         }
     }
 
-    private void OnApplicationQuit()
-    {
-        if (client != null)
-        {
-            client.Close();
-        }
-    }
-
-    // 엔티티 데이터 클래스들 (서버와 동일하게 정의)
+    // 모든 네트워크 엔티티의 기본 클래스
     public class BaseNetworkEntityData
     {
         public uint NetworkId { get; set; }
@@ -303,28 +340,32 @@ public class GameManager : MonoBehaviour
         public string SceneName { get; set; }
     }
 
+    // 플레이어 엔티티 데이터 클래스
     public class PlayerData : BaseNetworkEntityData
     {
-        // 추가적인 플레이어 속성이나 메서드가 필요하다면 여기에 정의
+        public string Name { get; set; }
+        public int Score { get; set; }
+        public float Speed { get; set; }
     }
 
-    public class BulletData : BaseNetworkEntityData
-    {
-        public uint OwnerId { get; set; }
-    }
+    // 별 엔티티 데이터 클래스
+    public class StarData : BaseNetworkEntityData { }
 
+    // NPC 엔티티 데이터 클래스
     public class NpcData : BaseNetworkEntityData
     {
-        // 추가적인 NPC 속성이나 메서드가 필요하다면 여기에 정의
+        public float Speed { get; set; }
     }
 
+    // 씬별 엔티티 데이터를 관리하는 클래스
     public class SceneData
     {
         public Dictionary<uint, PlayerData> Players { get; set; } = new Dictionary<uint, PlayerData>();
-        public Dictionary<uint, BulletData> Bullets { get; set; } = new Dictionary<uint, BulletData>();
+        public Dictionary<uint, StarData> Stars { get; set; } = new Dictionary<uint, StarData>();
         public Dictionary<uint, NpcData> Npcs { get; set; } = new Dictionary<uint, NpcData>();
     }
 
+    // 모든 엔티티를 포함하는 월드 상태 클래스
     public class WorldState
     {
         public Dictionary<string, SceneData> Worlds { get; set; } = new Dictionary<string, SceneData>();
